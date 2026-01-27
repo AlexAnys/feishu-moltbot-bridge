@@ -42,6 +42,7 @@
 - macOS（已安装 Clawdbot 并正常运行）
 - Node.js ≥ 18
 - Clawdbot Gateway 已启动（`clawdbot gateway status` 检查）
+- 桥接脚本需与 Gateway 在同一台机器（默认连接 `127.0.0.1`）
 
 ### 第一步：创建飞书机器人
 
@@ -81,6 +82,8 @@ echo "你的AppSecret" > ~/.clawdbot/secrets/feishu_app_secret
 chmod 600 ~/.clawdbot/secrets/feishu_app_secret
 ```
 
+> 如需自定义路径，可设置 `FEISHU_APP_SECRET_PATH` 指向该文件。
+
 ### 第四步：测试运行
 
 ```bash
@@ -114,7 +117,6 @@ feishu-bridge/
 ├── bridge.mjs           # 核心桥接脚本（~200行）
 ├── setup-service.mjs    # 自动生成 launchd 保活配置
 ├── package.json         # 依赖声明
-├── .env.example         # 环境变量示例
 └── README.md            # 你正在读的这个
 ```
 
@@ -142,6 +144,32 @@ feishu-bridge/
 ~/.clawdbot/logs/feishu-bridge.out.log   # 正常输出
 ~/.clawdbot/logs/feishu-bridge.err.log   # 错误日志
 ```
+
+---
+
+## 常见歧义与配置说明
+
+### 1) Clawdbot 配置路径
+
+默认读取：`~/.clawdbot/clawdbot.json`  
+如果你把 Clawdbot 安装在其他目录，需手动指定：
+
+```bash
+CLAWDBOT_CONFIG_PATH=/your/path/clawdbot.json FEISHU_APP_ID=cli_xxx node bridge.mjs
+```
+
+### 2) 选择 Clawdbot 的 Agent
+
+默认使用 `main`，如需切换：
+
+```bash
+CLAWDBOT_AGENT_ID=你的AgentID FEISHU_APP_ID=cli_xxx node bridge.mjs
+```
+
+### 3) Gateway 必须在本机
+
+桥接器固定连接 `127.0.0.1`，所以桥接脚本必须与 Gateway 在同一台机器。  
+如果你想跨机器部署，需要自行改代码或加一层转发。
 
 ### 停止服务
 
