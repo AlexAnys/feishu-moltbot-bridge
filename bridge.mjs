@@ -183,7 +183,8 @@ function shouldRespondInGroup(text, mentions) {
   if (/\b(why|how|what|when|where|who|help)\b/.test(t)) return true;
   const verbs = ['帮', '麻烦', '请', '能否', '可以', '解释', '看看', '排查', '分析', '总结', '写', '改', '修', '查', '对比', '翻译'];
   if (verbs.some(k => text.includes(k))) return true;
-  if (/^(alen|clawdbot|bot|助手|智能体)[\s,:，：]/i.test(text)) return true;
+  // Customize this list with your bot's name
+  if (/^(clawdbot|bot|助手|智能体)[\s,:，：]/i.test(text)) return true;
   return false;
 }
 
