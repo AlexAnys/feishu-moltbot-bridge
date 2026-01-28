@@ -1,5 +1,6 @@
-# 飞书 × Clawdbot 桥接器
+# 飞书 × Moltbot 桥接器
 
+> 原 Clawdbot 已更名为 Moltbot，本项目同步更新
 > 让你的 Clawdbot 智能体直接在飞书里对话——无需公网服务器、无需域名、无需备案。
 
 ---
