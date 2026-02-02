@@ -1060,12 +1060,17 @@ async function uploadAndSendMedia(chatId, mediaUrlOrPath, captionText) {
     if (!tempPath && p.startsWith('/')) {
       if (!isAllowedOutboundPath(p)) {
         if (DEBUG) console.log(`[DEBUG] outbound blocked by allowlist: ${p}`);
-        await sendText(chatId, captionText ? `${captionText}\n（拒绝发送非白名单路径的本地文件）` : '（拒绝发送非白名单路径的本地文件）');
+        // Don't spam users in normal mode; just skip this media.
+        if (DEBUG) {
+          await sendText(chatId, captionText ? `${captionText}\n（拒绝发送非白名单路径的本地文件）` : '（拒绝发送非白名单路径的本地文件）');
+        }
         return;
       }
       const ok = safeFileSizeOk(p);
       if (!ok.ok) {
-        await sendText(chatId, captionText ? `${captionText}\n（附件过大或不可读：${ok.reason}）` : `（附件过大或不可读：${ok.reason}）`);
+        if (DEBUG) {
+          await sendText(chatId, captionText ? `${captionText}\n（附件过大或不可读：${ok.reason}）` : `（附件过大或不可读：${ok.reason}）`);
+        }
         return;
       }
     }
