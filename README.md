@@ -16,9 +16,15 @@
 
 1) **打开“终端 Terminal”**
 
-2) **进入你之前克隆本项目的目录**（不知道在哪就先问：让电脑里搜索 `feishu-openclaw` 文件夹）
+2) **进入你之前克隆本项目的目录**
 
-3) **停止旧的桥接服务（避免文件占用/旧进程继续跑旧代码）**
+- 不知道目录在哪：先在电脑里搜索 `feishu-openclaw` 文件夹
+- 小技巧：在 Finder 里找到该文件夹后，把文件夹**拖进终端**，就能直接得到路径
+
+3) **停止旧的桥接服务（避免旧进程继续跑旧代码）**
+
+> 如果你当初没有做“开机自启（launchd）”，而是手动在终端运行的 `node bridge.mjs`：
+> 你可以跳过这一步（或者直接在旧终端窗口按 `Ctrl + C` 停止）。
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.clawdbot.feishu-bridge.plist 2>/dev/null || true
@@ -39,8 +45,16 @@ npm install
 
 6) **重新启动桥接服务**
 
+- 如果你使用了 launchd（开机自启）：
+
 ```bash
 launchctl load ~/Library/LaunchAgents/com.clawdbot.feishu-bridge.plist
+```
+
+- 如果你是手动运行：
+
+```bash
+FEISHU_APP_ID=cli_xxxxxxxxx node bridge.mjs
 ```
 
 7) **验证是否成功**
