@@ -91,11 +91,177 @@ const MAX_ATTACHMENTS = Number(process.env.FEISHU_BRIDGE_MAX_ATTACHMENTS ?? 4);
 
 const SELFTEST = process.argv.includes('--selftest') || process.env.FEISHU_BRIDGE_SELFTEST === '1';
 const DEBUG = process.env.FEISHU_BRIDGE_DEBUG === '1';
+const BRIDGE_VERSION = readBridgeVersion();
+const DEVICE_IDENTITY_PATH = resolveDeviceIdentityPath(process.env.FEISHU_BRIDGE_DEVICE_IDENTITY_PATH);
+
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+let DEVICE_IDENTITY = null;
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
 function resolvePath(p) {
   return String(p || '').replace(/^~/, os.homedir());
+}
+
+function toBase64Url(buffer) {
+  return Buffer.from(buffer).toString('base64url');
+}
+
+function fromBase64Url(str) {
+  return Buffer.from(str, 'base64url');
+}
+
+function readBridgeVersion() {
+  try {
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    return String(pkg?.version || '0.0.0');
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function resolveDeviceIdentityPath(explicitPath) {
+  if (explicitPath) return resolvePath(explicitPath);
+  const openclawDir = resolvePath('~/.openclaw');
+  if (fs.existsSync(openclawDir)) {
+    return path.join(openclawDir, 'feishu-bridge-device.json');
+  }
+  return resolvePath('~/.clawdbot/feishu-bridge-device.json');
+}
+
+function buildEd25519PublicKey(rawPublicKey) {
+  if (!Buffer.isBuffer(rawPublicKey) || rawPublicKey.length !== 32) {
+    throw new Error('Invalid Ed25519 public key length');
+  }
+  const der = Buffer.concat([ED25519_SPKI_PREFIX, rawPublicKey]);
+  return crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+}
+
+function buildEd25519PrivateKey(rawPrivateKey) {
+  if (!Buffer.isBuffer(rawPrivateKey) || rawPrivateKey.length !== 32) {
+    throw new Error('Invalid Ed25519 private key length');
+  }
+  const der = Buffer.concat([ED25519_PKCS8_PREFIX, rawPrivateKey]);
+  return crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+}
+
+function writeDeviceIdentityFile(filePath, record) {
+  const resolved = resolvePath(filePath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.writeFileSync(resolved, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(resolved, 0o600);
+  } catch {
+    // ignore permission errors on non-POSIX fs
+  }
+}
+
+function validateAndHydrateDeviceIdentity(record, filePath) {
+  if (!record || typeof record !== 'object') throw new Error('Device identity must be an object');
+
+  const deviceId = String(record.deviceId || '').trim();
+  const publicKey = String(record.publicKey || '').trim();
+  const privateKey = String(record.privateKey || '').trim();
+  const createdAtMs = Number(record.createdAtMs || 0);
+
+  if (record.version !== 1) throw new Error('Unsupported device identity version');
+  if (!/^[a-f0-9]{64}$/i.test(deviceId)) throw new Error('Invalid deviceId');
+
+  const pubRaw = fromBase64Url(publicKey);
+  const privRaw = fromBase64Url(privateKey);
+  if (pubRaw.length !== 32) throw new Error('Invalid public key bytes');
+  if (privRaw.length !== 32) throw new Error('Invalid private key bytes');
+
+  const derivedDeviceId = crypto.createHash('sha256').update(pubRaw).digest('hex');
+  if (derivedDeviceId !== deviceId.toLowerCase()) throw new Error('deviceId mismatch');
+
+  return {
+    version: 1,
+    deviceId: derivedDeviceId,
+    publicKey,
+    privateKey,
+    createdAtMs: Number.isFinite(createdAtMs) && createdAtMs > 0 ? createdAtMs : Date.now(),
+    deviceToken: typeof record.deviceToken === 'string' ? record.deviceToken : undefined,
+    filePath: resolvePath(filePath),
+    publicKeyObject: buildEd25519PublicKey(pubRaw),
+    privateKeyObject: buildEd25519PrivateKey(privRaw),
+  };
+}
+
+function createDeviceIdentityRecord() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const pubRaw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
+  const privRaw = privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32);
+  const deviceId = crypto.createHash('sha256').update(pubRaw).digest('hex');
+
+  return {
+    version: 1,
+    deviceId,
+    publicKey: toBase64Url(pubRaw),
+    privateKey: toBase64Url(privRaw),
+    createdAtMs: Date.now(),
+  };
+}
+
+async function loadOrCreateDeviceIdentity(filePath = DEVICE_IDENTITY_PATH) {
+  const resolved = resolvePath(filePath);
+
+  if (fs.existsSync(resolved)) {
+    try {
+      const raw = fs.readFileSync(resolved, 'utf8');
+      const parsed = JSON.parse(raw);
+      const identity = validateAndHydrateDeviceIdentity(parsed, resolved);
+      try {
+        fs.chmodSync(resolved, 0o600);
+      } catch {
+        // ignore
+      }
+      return identity;
+    } catch (e) {
+      console.error(`[WARN] Device identity file invalid, regenerating: ${e?.message || String(e)}`);
+    }
+  }
+
+  const record = createDeviceIdentityRecord();
+  writeDeviceIdentityFile(resolved, record);
+  return validateAndHydrateDeviceIdentity(record, resolved);
+}
+
+function persistDeviceToken(identity, deviceToken) {
+  const token = String(deviceToken || '').trim();
+  if (!token || !identity) return identity;
+  if (identity.deviceToken === token) return identity;
+
+  const record = {
+    version: 1,
+    deviceId: identity.deviceId,
+    publicKey: identity.publicKey,
+    privateKey: identity.privateKey,
+    createdAtMs: identity.createdAtMs,
+    deviceToken: token,
+  };
+
+  writeDeviceIdentityFile(identity.filePath, record);
+  return { ...identity, deviceToken: token };
+}
+
+/**
+ * Build the device auth payload string that the Gateway expects.
+ * Format: version|deviceId|clientId|clientMode|role|scopes|signedAtMs|token[|nonce]
+ */
+function buildDeviceAuthPayload({ deviceId, clientId, clientMode, role, scopes, signedAtMs, token, nonce }) {
+  const version = nonce ? 'v2' : 'v1';
+  const base = [version, deviceId, clientId, clientMode, role, scopes.join(','), String(signedAtMs), token || ''];
+  if (version === 'v2') base.push(nonce || '');
+  return base.join('|');
+}
+
+function signDevicePayload(identity, payload) {
+  const signature = crypto.sign(null, Buffer.from(payload, 'utf8'), identity.privateKeyObject);
+  return toBase64Url(signature);
 }
 
 function mustRead(filePath, label) {
@@ -427,6 +593,9 @@ if (!GATEWAY_TOKEN) {
   process.exit(1);
 }
 
+DEVICE_IDENTITY = await loadOrCreateDeviceIdentity(DEVICE_IDENTITY_PATH);
+console.log(`[OK] Device identity: ${DEVICE_IDENTITY.deviceId.slice(0, 8)}...`);
+
 // ─── Feishu SDK setup ────────────────────────────────────────────
 
 const sdkConfig = {
@@ -463,12 +632,83 @@ async function askClawdbot({ text, sessionKey, attachments = [] }) {
     let runId = null;
     let buf = '';
     let mediaUrls = [];
+    let connectSent = false;
+    let connectFallbackTimer = null;
 
     const close = () => {
       try {
         ws.close();
       } catch {}
     };
+
+    const sendConnect = (challengeNonce = null) => {
+      if (connectSent) return;
+      connectSent = true;
+
+      if (connectFallbackTimer) {
+        clearTimeout(connectFallbackTimer);
+        connectFallbackTimer = null;
+      }
+
+      const params = {
+        minProtocol: 3,
+        maxProtocol: 3,
+        client: { id: 'gateway-client', version: BRIDGE_VERSION, platform: 'macos', mode: 'backend' },
+        role: 'operator',
+        scopes: ['operator.read', 'operator.write'],
+        auth: { token: GATEWAY_TOKEN },
+        locale: 'zh-CN',
+        userAgent: 'feishu-openclaw-bridge',
+      };
+
+      if (DEVICE_IDENTITY) {
+        try {
+          const signedAt = Date.now();
+          const payload = buildDeviceAuthPayload({
+            deviceId: DEVICE_IDENTITY.deviceId,
+            clientId: params.client.id,
+            clientMode: params.client.mode,
+            role: params.role,
+            scopes: params.scopes,
+            signedAtMs: signedAt,
+            token: GATEWAY_TOKEN,
+            nonce: challengeNonce || undefined,
+          });
+          const signature = signDevicePayload(DEVICE_IDENTITY, payload);
+          params.device = {
+            id: DEVICE_IDENTITY.deviceId,
+            publicKey: DEVICE_IDENTITY.publicKey,
+            signature,
+            signedAt,
+            ...(challengeNonce ? { nonce: challengeNonce } : {}),
+          };
+        } catch (e) {
+          console.error(`[WARN] Device auth sign failed, falling back without device block: ${e?.message || String(e)}`);
+        }
+      }
+
+      ws.send(
+        JSON.stringify({
+          type: 'req',
+          id: 'connect',
+          method: 'connect',
+          params,
+        }),
+      );
+    };
+
+    ws.on('open', () => {
+      // Backward compatibility: older gateways may not send connect.challenge.
+      connectFallbackTimer = setTimeout(() => sendConnect(null), 300);
+      if (typeof connectFallbackTimer.unref === 'function') connectFallbackTimer.unref();
+    });
+
+    ws.on('close', () => {
+      if (connectFallbackTimer) {
+        clearTimeout(connectFallbackTimer);
+        connectFallbackTimer = null;
+      }
+    });
 
     ws.on('error', (e) => {
       close();
@@ -484,23 +724,8 @@ async function askClawdbot({ text, sessionKey, attachments = [] }) {
       }
 
       if (msg.type === 'event' && msg.event === 'connect.challenge') {
-        ws.send(
-          JSON.stringify({
-            type: 'req',
-            id: 'connect',
-            method: 'connect',
-            params: {
-              minProtocol: 3,
-              maxProtocol: 3,
-              client: { id: 'gateway-client', version: '0.3.0', platform: 'macos', mode: 'backend' },
-              role: 'operator',
-              scopes: ['operator.read', 'operator.write'],
-              auth: { token: GATEWAY_TOKEN },
-              locale: 'zh-CN',
-              userAgent: 'feishu-clawdbot-bridge',
-            },
-          }),
-        );
+        const nonce = msg.payload?.nonce;
+        sendConnect(typeof nonce === 'string' ? nonce : null);
         return;
       }
 
@@ -509,6 +734,15 @@ async function askClawdbot({ text, sessionKey, attachments = [] }) {
           close();
           reject(new Error(msg.error?.message || 'connect failed'));
           return;
+        }
+
+        const deviceToken = msg.payload?.auth?.deviceToken;
+        if (typeof deviceToken === 'string' && deviceToken.trim()) {
+          try {
+            DEVICE_IDENTITY = persistDeviceToken(DEVICE_IDENTITY, deviceToken);
+          } catch (e) {
+            console.error(`[WARN] Failed to persist device token: ${e?.message || String(e)}`);
+          }
         }
 
         const params = {
@@ -1345,6 +1579,51 @@ async function runSelfTest() {
   // 3) MEDIA line parsing
   const r = parseMediaLines('hello\nMEDIA: /tmp/a.mp4\nworld');
   ok('MEDIA parsed', r.mediaUrls.length === 1 && r.text.includes('hello') && r.text.includes('world'));
+
+  // 4) Device identity generation + persistence + signing
+  const testDevicePath = path.join(os.tmpdir(), `feishu_bridge_test_device_${Date.now()}.json`);
+  const testIdentity = await loadOrCreateDeviceIdentity(testDevicePath);
+  ok('device identity generated', Boolean(testIdentity.deviceId) && testIdentity.deviceId.length === 64);
+  ok('device identity has keys', Boolean(testIdentity.publicKey) && Boolean(testIdentity.privateKey));
+
+  // Verify payload signing round-trip
+  const testPayload = buildDeviceAuthPayload({
+    deviceId: testIdentity.deviceId,
+    clientId: 'test-client',
+    clientMode: 'backend',
+    role: 'operator',
+    scopes: ['operator.read', 'operator.write'],
+    signedAtMs: Date.now(),
+    token: 'test-token',
+    nonce: 'test-nonce',
+  });
+  ok('payload format v2', testPayload.startsWith('v2|') && testPayload.includes('test-nonce'));
+  const testSig = signDevicePayload(testIdentity, testPayload);
+  ok('signature is base64url', typeof testSig === 'string' && testSig.length > 0 && !testSig.includes('+'));
+
+  // Verify signature with public key
+  const pubKeyObj = testIdentity.publicKeyObject;
+  const sigBuf = fromBase64Url(testSig);
+  const verified = crypto.verify(null, Buffer.from(testPayload, 'utf8'), pubKeyObj, sigBuf);
+  ok('signature verifies', verified === true);
+
+  // v1 payload (no nonce)
+  const testPayloadV1 = buildDeviceAuthPayload({
+    deviceId: testIdentity.deviceId,
+    clientId: 'test-client',
+    clientMode: 'backend',
+    role: 'operator',
+    scopes: ['operator.read', 'operator.write'],
+    signedAtMs: Date.now(),
+    token: 'test-token',
+  });
+  ok('payload format v1', testPayloadV1.startsWith('v1|') && !testPayloadV1.includes('test-nonce'));
+
+  try {
+    fs.unlinkSync(testDevicePath);
+  } catch {
+    // ignore
+  }
 
   console.log('[OK] Selftests finished');
 }
