@@ -199,6 +199,8 @@ chmod 600 ~/.clawdbot/secrets/feishu_app_secret
 FEISHU_APP_ID=cli_xxxxxxxxx node bridge.mjs
 ```
 
+该桥接兼容 Clawdbot / OpenClaw Gateway。
+
 在飞书里给机器人发一条消息，看到回复就说明成功了 🎉
 
 ### 第五步：设置开机自启（可选但推荐）
@@ -307,6 +309,21 @@ tail -n 200 ~/.clawdbot/logs/feishu-bridge.err.log
 - 但 AI 是否能“读懂”文件内容，取决于你使用的 agent/工具链是否会去读取该文件。
 
 > 如果你希望自动解析 PDF/Word/Excel 并把内容转成文本喂给 AI，需要额外扩展（欢迎提 issue）。
+
+### 5) 升级到 OpenClaw 2026.2.x 后报 "missing scope: operator.write"
+
+这是因为新版 OpenClaw 引入了 Device Identity 认证机制。**解决方法：升级桥接到最新版本。**
+
+```bash
+cd /path/to/feishu-openclaw
+git pull
+npm install
+# 重启服务
+launchctl unload ~/Library/LaunchAgents/com.clawdbot.feishu-bridge.plist
+launchctl load ~/Library/LaunchAgents/com.clawdbot.feishu-bridge.plist
+```
+
+升级后桥接会自动生成设备密钥并完成认证，无需额外操作。
 
 ## 常见歧义与配置说明
 
