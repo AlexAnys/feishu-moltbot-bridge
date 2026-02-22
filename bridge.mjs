@@ -248,10 +248,19 @@ function persistDeviceToken(identity, deviceToken) {
   return { ...identity, deviceToken: token };
 }
 
-function signDeviceNonce(identity, nonce) {
-  const value = String(nonce || '').trim();
-  if (!value) throw new Error('Missing challenge nonce');
-  const signature = crypto.sign(null, Buffer.from(value, 'utf8'), identity.privateKeyObject);
+/**
+ * Build the device auth payload string that the Gateway expects.
+ * Format: version|deviceId|clientId|clientMode|role|scopes|signedAtMs|token[|nonce]
+ */
+function buildDeviceAuthPayload({ deviceId, clientId, clientMode, role, scopes, signedAtMs, token, nonce }) {
+  const version = nonce ? 'v2' : 'v1';
+  const base = [version, deviceId, clientId, clientMode, role, scopes.join(','), String(signedAtMs), token || ''];
+  if (version === 'v2') base.push(nonce || '');
+  return base.join('|');
+}
+
+function signDevicePayload(identity, payload) {
+  const signature = crypto.sign(null, Buffer.from(payload, 'utf8'), identity.privateKeyObject);
   return toBase64Url(signature);
 }
 
@@ -652,19 +661,29 @@ async function askClawdbot({ text, sessionKey, attachments = [] }) {
         userAgent: 'feishu-openclaw-bridge',
       };
 
-      if (challengeNonce && DEVICE_IDENTITY) {
+      if (DEVICE_IDENTITY) {
         try {
           const signedAt = Date.now();
-          const signature = signDeviceNonce(DEVICE_IDENTITY, challengeNonce);
+          const payload = buildDeviceAuthPayload({
+            deviceId: DEVICE_IDENTITY.deviceId,
+            clientId: params.client.id,
+            clientMode: params.client.mode,
+            role: params.role,
+            scopes: params.scopes,
+            signedAtMs: signedAt,
+            token: GATEWAY_TOKEN,
+            nonce: challengeNonce || undefined,
+          });
+          const signature = signDevicePayload(DEVICE_IDENTITY, payload);
           params.device = {
             id: DEVICE_IDENTITY.deviceId,
             publicKey: DEVICE_IDENTITY.publicKey,
             signature,
             signedAt,
-            nonce: challengeNonce,
+            ...(challengeNonce ? { nonce: challengeNonce } : {}),
           };
         } catch (e) {
-          console.error(`[WARN] Device challenge sign failed, falling back without device block: ${e?.message || String(e)}`);
+          console.error(`[WARN] Device auth sign failed, falling back without device block: ${e?.message || String(e)}`);
         }
       }
 
@@ -1561,11 +1580,45 @@ async function runSelfTest() {
   const r = parseMediaLines('hello\nMEDIA: /tmp/a.mp4\nworld');
   ok('MEDIA parsed', r.mediaUrls.length === 1 && r.text.includes('hello') && r.text.includes('world'));
 
-  // 4) Device identity generation + persistence
+  // 4) Device identity generation + persistence + signing
   const testDevicePath = path.join(os.tmpdir(), `feishu_bridge_test_device_${Date.now()}.json`);
   const testIdentity = await loadOrCreateDeviceIdentity(testDevicePath);
   ok('device identity generated', Boolean(testIdentity.deviceId) && testIdentity.deviceId.length === 64);
   ok('device identity has keys', Boolean(testIdentity.publicKey) && Boolean(testIdentity.privateKey));
+
+  // Verify payload signing round-trip
+  const testPayload = buildDeviceAuthPayload({
+    deviceId: testIdentity.deviceId,
+    clientId: 'test-client',
+    clientMode: 'backend',
+    role: 'operator',
+    scopes: ['operator.read', 'operator.write'],
+    signedAtMs: Date.now(),
+    token: 'test-token',
+    nonce: 'test-nonce',
+  });
+  ok('payload format v2', testPayload.startsWith('v2|') && testPayload.includes('test-nonce'));
+  const testSig = signDevicePayload(testIdentity, testPayload);
+  ok('signature is base64url', typeof testSig === 'string' && testSig.length > 0 && !testSig.includes('+'));
+
+  // Verify signature with public key
+  const pubKeyObj = testIdentity.publicKeyObject;
+  const sigBuf = fromBase64Url(testSig);
+  const verified = crypto.verify(null, Buffer.from(testPayload, 'utf8'), pubKeyObj, sigBuf);
+  ok('signature verifies', verified === true);
+
+  // v1 payload (no nonce)
+  const testPayloadV1 = buildDeviceAuthPayload({
+    deviceId: testIdentity.deviceId,
+    clientId: 'test-client',
+    clientMode: 'backend',
+    role: 'operator',
+    scopes: ['operator.read', 'operator.write'],
+    signedAtMs: Date.now(),
+    token: 'test-token',
+  });
+  ok('payload format v1', testPayloadV1.startsWith('v1|') && !testPayloadV1.includes('test-nonce'));
+
   try {
     fs.unlinkSync(testDevicePath);
   } catch {
