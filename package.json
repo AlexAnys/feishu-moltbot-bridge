@@ -1,6 +1,6 @@
 {
   "name": "feishu-clawdbot-bridge",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Connect Feishu/Lark bot to Clawdbot agent via WebSocket — no public server needed",
   "type": "module",
   "scripts": {
