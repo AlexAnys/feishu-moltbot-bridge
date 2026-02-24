@@ -1,8 +1,8 @@
 /**
- * Feishu ↔ Clawdbot Bridge
+ * Feishu ↔ OpenClaw Bridge
  *
  * Receives messages from Feishu via WebSocket (long connection),
- * forwards them to Clawdbot Gateway, and sends the AI reply back.
+ * forwards them to OpenClaw Gateway, and sends the AI reply back.
  *
  * Design goals:
  * - Robust: never silently drop messages just because parsing failed.
@@ -62,22 +62,38 @@ function loadDotEnvIfPresent() {
 // ─── Config ──────────────────────────────────────────────────────
 
 const APP_ID = process.env.FEISHU_APP_ID;
-const APP_SECRET_PATH = resolvePath(process.env.FEISHU_APP_SECRET_PATH || '~/.clawdbot/secrets/feishu_app_secret');
-const CLAWDBOT_CONFIG_PATH = resolvePath(process.env.CLAWDBOT_CONFIG_PATH || '~/.clawdbot/clawdbot.json');
-const CLAWDBOT_AGENT_ID = process.env.CLAWDBOT_AGENT_ID || 'main';
+const FEISHU_DOMAIN = (process.env.FEISHU_DOMAIN || 'feishu').toLowerCase();
+const sdkDomain = FEISHU_DOMAIN === 'lark' ? Lark.Domain.Lark : Lark.Domain.Feishu;
+const FEISHU_CONNECTION_MODE = (process.env.FEISHU_CONNECTION_MODE || 'websocket').toLowerCase() === 'webhook' ? 'webhook' : 'websocket';
+const FEISHU_WEBHOOK_PORT = Number.parseInt(process.env.FEISHU_WEBHOOK_PORT || '3000', 10) || 3000;
+const FEISHU_WEBHOOK_PATH = process.env.FEISHU_WEBHOOK_PATH || '/feishu/events';
+const FEISHU_ENCRYPT_KEY = process.env.FEISHU_ENCRYPT_KEY || '';
+const FEISHU_VERIFICATION_TOKEN = process.env.FEISHU_VERIFICATION_TOKEN || '';
+
+const APP_SECRET_PATH = resolveConfiguredPath(process.env.FEISHU_APP_SECRET_PATH, [
+  '~/.openclaw/secrets/feishu_app_secret',
+  '~/.clawdbot/secrets/feishu_app_secret',
+]);
+const OPENCLAW_CONFIG_PATH = resolveConfiguredPath(process.env.OPENCLAW_CONFIG_PATH || process.env.CLAWDBOT_CONFIG_PATH, [
+  '~/.openclaw/openclaw.json',
+  '~/.clawdbot/clawdbot.json',
+  '~/.clawdbot/openclaw.json',
+]);
+const OPENCLAW_AGENT_ID = process.env.OPENCLAW_AGENT_ID || process.env.CLAWDBOT_AGENT_ID || 'main';
 const THINKING_THRESHOLD_MS = Number(process.env.FEISHU_THINKING_THRESHOLD_MS ?? 2500);
 
 // Local markdown media support (issue #3): allow reading ONLY under these dirs.
-// Default supports the common local automation path: ~/.clawdbot/media
-const ALLOWED_LOCAL_MEDIA_DIRS = (process.env.FEISHU_BRIDGE_ALLOWED_LOCAL_MEDIA_DIRS || '~/.clawdbot/media')
-  .split(',')
-  .map((s) => resolvePath(s.trim()))
-  .filter(Boolean);
+// Default supports both OpenClaw and Clawdbot media dirs.
+const ALLOWED_LOCAL_MEDIA_DIRS =
+  (process.env.FEISHU_BRIDGE_ALLOWED_LOCAL_MEDIA_DIRS || '~/.openclaw/media,~/.clawdbot/media')
+    .split(',')
+    .map((s) => resolvePath(s.trim()))
+    .filter(Boolean);
 
 // Outbound media (agent → Feishu): allow sending files ONLY from these dirs.
 // Default includes /tmp so tool-generated images can be sent.
 const ALLOWED_OUTBOUND_MEDIA_DIRS = (
-  process.env.FEISHU_BRIDGE_ALLOWED_OUTBOUND_MEDIA_DIRS || `~/.clawdbot/media,${os.tmpdir()},/tmp`
+  process.env.FEISHU_BRIDGE_ALLOWED_OUTBOUND_MEDIA_DIRS || `~/.openclaw/media,~/.clawdbot/media,${os.tmpdir()},/tmp`
 )
   .split(',')
   .map((s) => resolvePath(s.trim()))
@@ -103,6 +119,19 @@ let DEVICE_IDENTITY = null;
 
 function resolvePath(p) {
   return String(p || '').replace(/^~/, os.homedir());
+}
+
+function pickFirstExistingPath(paths) {
+  for (const p of paths || []) {
+    const resolved = resolvePath(p);
+    if (fs.existsSync(resolved)) return resolved;
+  }
+  return resolvePath(paths?.[0] || '');
+}
+
+function resolveConfiguredPath(explicitPath, fallbackPaths) {
+  if (explicitPath && String(explicitPath).trim()) return resolvePath(String(explicitPath).trim());
+  return pickFirstExistingPath(fallbackPaths);
 }
 
 function toBase64Url(buffer) {
@@ -583,13 +612,13 @@ if (!APP_ID) {
 }
 
 const APP_SECRET = mustRead(APP_SECRET_PATH, 'Feishu App Secret');
-const clawdConfig = JSON.parse(mustRead(CLAWDBOT_CONFIG_PATH, 'Clawdbot config'));
+const clawdConfig = JSON.parse(mustRead(OPENCLAW_CONFIG_PATH, 'OpenClaw/Clawdbot config'));
 
 const GATEWAY_PORT = clawdConfig?.gateway?.port || 18789;
 const GATEWAY_TOKEN = clawdConfig?.gateway?.auth?.token;
 
 if (!GATEWAY_TOKEN) {
-  console.error('[FATAL] gateway.auth.token missing in Clawdbot config');
+  console.error('[FATAL] gateway.auth.token missing in OpenClaw/Clawdbot config');
   process.exit(1);
 }
 
@@ -601,12 +630,15 @@ console.log(`[OK] Device identity: ${DEVICE_IDENTITY.deviceId.slice(0, 8)}...`);
 const sdkConfig = {
   appId: APP_ID,
   appSecret: APP_SECRET,
-  domain: Lark.Domain.Feishu,
+  domain: sdkDomain,
   appType: Lark.AppType.SelfBuild,
 };
 
-const client = new Lark.Client(sdkConfig);
-const wsClient = new Lark.WSClient({ ...sdkConfig, loggerLevel: Lark.LoggerLevel.info });
+const wsClient = new Lark.WSClient({ ...sdkConfig, domain: sdkDomain, loggerLevel: Lark.LoggerLevel.info });
+const client =
+  FEISHU_CONNECTION_MODE === 'webhook'
+    ? new Lark.Client({ ...sdkConfig, domain: sdkDomain })
+    : new Lark.Client(sdkConfig);
 
 // ─── Dedup (Feishu may deliver the same event more than once) ────
 
@@ -747,7 +779,7 @@ async function askClawdbot({ text, sessionKey, attachments = [] }) {
 
         const params = {
           message: text,
-          agentId: CLAWDBOT_AGENT_ID,
+          agentId: OPENCLAW_AGENT_ID,
           sessionKey,
           deliver: false,
           // Help the agent return media in a way the bridge can forward.
@@ -849,7 +881,7 @@ function shouldRespondInGroup(text, mentions) {
   if (/\b(why|how|what|when|where|who|help)\b/.test(t)) return true;
   const verbs = ['帮', '麻烦', '请', '能否', '可以', '解释', '看看', '排查', '分析', '总结', '写', '改', '修', '查', '对比', '翻译'];
   if (verbs.some((k) => text.includes(k))) return true;
-  if (/^(alen|clawdbot|bot|助手|智能体)[\s,:，：]/i.test(text)) return true;
+  if (/^(alen|openclaw|clawdbot|bot|助手|智能体)[\s,:，：]/i.test(text)) return true;
   return false;
 }
 
@@ -1380,8 +1412,7 @@ async function uploadAndSendMedia(chatId, mediaUrlOrPath, captionText) {
 
 // ─── Message handler ─────────────────────────────────────────────
 
-const dispatcher = new Lark.EventDispatcher({}).register({
-  'im.message.receive_v1': async (data) => {
+async function handleMessageEvent(data) {
     try {
       const { message, sender } = data || {};
       const chatId = message?.chat_id;
@@ -1536,14 +1567,46 @@ const dispatcher = new Lark.EventDispatcher({}).register({
     } catch (e) {
       console.error('[ERROR] message handler:', e);
     }
-  },
+}
+
+const dispatcher = new Lark.EventDispatcher({
+  encryptKey: FEISHU_ENCRYPT_KEY || undefined,
+  verificationToken: FEISHU_VERIFICATION_TOKEN || undefined,
+}).register({
+  'im.message.receive_v1': handleMessageEvent,
 });
 
 // ─── Start ───────────────────────────────────────────────────────
 
-wsClient.start({ eventDispatcher: dispatcher });
-console.log(`[OK] Feishu bridge started (appId=${APP_ID})`);
-console.log(`[OK] Allowed local media dirs: ${ALLOWED_LOCAL_MEDIA_DIRS.join(', ') || '(none)'}`);
+if (FEISHU_CONNECTION_MODE === 'webhook') {
+  // Webhook mode: start an HTTP server to receive Lark/Feishu event callbacks.
+  const webhookHandler = Lark.adaptDefault(FEISHU_WEBHOOK_PATH, dispatcher, { autoChallenge: true });
+  const webhookServer = http.createServer((req, res) => {
+    Promise.resolve(webhookHandler(req, res)).catch((err) => {
+      console.error('[ERROR] webhook handler:', err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
+    });
+  });
+
+  webhookServer.listen(FEISHU_WEBHOOK_PORT, () => {
+    console.log(`[OK] Feishu bridge started in WEBHOOK mode (appId=${APP_ID}, domain=${FEISHU_DOMAIN})`);
+    console.log(`[OK] Webhook server listening on port ${FEISHU_WEBHOOK_PORT}, path ${FEISHU_WEBHOOK_PATH}`);
+    console.log(`[OK] Allowed local media dirs: ${ALLOWED_LOCAL_MEDIA_DIRS.join(', ') || '(none)'}`);
+  });
+
+  webhookServer.on('error', (err) => {
+    console.error(`[FATAL] Webhook server error: ${err.message}`);
+    process.exit(1);
+  });
+} else {
+  // WebSocket mode: use Feishu SDK's long connection (default, feishu only).
+  wsClient.start({ eventDispatcher: dispatcher });
+  console.log(`[OK] Feishu bridge started in WEBSOCKET mode (appId=${APP_ID}, domain=${FEISHU_DOMAIN})`);
+  console.log(`[OK] Allowed local media dirs: ${ALLOWED_LOCAL_MEDIA_DIRS.join(', ') || '(none)'}`);
+}
 
 // ─── Self-test ───────────────────────────────────────────────────
 

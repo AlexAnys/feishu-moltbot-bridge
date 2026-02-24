@@ -376,6 +376,97 @@ launchctl unload ~/Library/LaunchAgents/com.clawdbot.feishu-bridge.plist
 
 **Q: 能同时接 Telegram 吗？**
 可以。Clawdbot 原生支持 Telegram 等渠道，飞书桥接只是多加一个入口，互不影响。
+
+---
+
+## 🌏 Lark（国际版）接入指南
+
+> 飞书国际版（Lark）不支持 WebSocket 长连接，需要使用 **Webhook 模式**。
+> 这意味着 Lark 的服务器需要能访问到你的桥接服务。
+
+### 与飞书版的区别
+
+| | 飞书（国内版） | Lark（国际版） |
+|---|---|---|
+| 连接方式 | WebSocket 长连接 ✅ | **Webhook HTTP 回调** |
+| 需要公网？ | ❌ 不需要 | ✅ 需要（或用隧道） |
+| 开发者平台 | [open.feishu.cn](https://open.feishu.cn) | [open.larksuite.com](https://open.larksuite.com) |
+
+### 第一步：配置环境变量
+
+在 `.env` 文件中添加：
+
+```env
+FEISHU_DOMAIN=lark
+FEISHU_CONNECTION_MODE=webhook
+FEISHU_WEBHOOK_PORT=3000
+FEISHU_WEBHOOK_PATH=/feishu/events
+```
+
+### 第二步：暴露本地端口到公网
+
+Lark 需要能访问到你的 webhook 地址。推荐使用 **Cloudflare Tunnel**（免费、稳定）：
+
+```bash
+# 安装 cloudflared（macOS）
+brew install cloudflared
+
+# 一键暴露本地 3000 端口（临时，用于测试）
+cloudflared tunnel --url http://localhost:3000
+```
+
+运行后会得到一个公网 URL，类似：`https://xxx-yyy-zzz.trycloudflare.com`
+
+> **与 VPN/代理兼容性**：Cloudflare Tunnel 不创建虚拟网卡，不修改系统路由表，与 Clash Verge、V2Ray 等代理工具**完全兼容**，可以同时使用。
+
+如需固定域名（推荐正式使用时设置）：
+
+```bash
+# 登录 Cloudflare
+cloudflared tunnel login
+
+# 创建隧道
+cloudflared tunnel create feishu-bridge
+
+# 配置域名（需要在 Cloudflare DNS 有一个域名）
+cloudflared tunnel route dns feishu-bridge feishu.yourdomain.com
+
+# 启动隧道
+cloudflared tunnel run --url http://localhost:3000 feishu-bridge
+```
+
+其他隧道方案：
+- **ngrok**：`ngrok http 3000`（免费版 URL 会变）
+- **Tailscale Funnel**：如果你已经用 Tailscale，配置最简单
+
+### 第三步：配置 Lark 后台
+
+1. 打开 [Lark Developer Console](https://open.larksuite.com/app)
+2. 创建应用、添加机器人能力（同飞书版步骤）
+3. 进入 **Event Subscriptions**：
+   - **Request URL** 填入你的公网地址 + webhook 路径，例如：
+     `https://xxx-yyy-zzz.trycloudflare.com/feishu/events`
+   - Lark 会发送一个验证请求，桥接服务会自动响应（需要先启动桥接）
+4. 添加事件：`Receive messages - im.message.receive_v1`
+5. 权限配置同飞书版
+
+### 第四步：启动桥接
+
+```bash
+FEISHU_APP_ID=cli_xxxxxxxxx node bridge.mjs
+```
+
+如果一切正常，你会看到：
+```
+[OK] Webhook server listening on port 3000, path /feishu/events
+```
+
+### 注意事项
+
+- Webhook 模式下，桥接进程必须持续运行且公网可访问
+- 如果使用临时隧道（如 `cloudflared tunnel --url`），每次重启 URL 会变，需要去 Lark 后台更新
+- 建议正式使用时配置固定域名的 Cloudflare Tunnel
+
 ---
 
 ## 链接 / Links
